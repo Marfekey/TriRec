@@ -31,7 +31,7 @@ from config import (
     createInterDF,
     createItemDF,
 )
-from request import parallel_get_responses, MAX_WORKERS
+from request import parallel_get_responses, MAX_WORKERS, API_BATCH
 from fuzzywuzzy import fuzz
 
 # Import SASRec-related modules
@@ -57,11 +57,9 @@ memory_exp_name = f"{DOMAIN}_{num_users_to_sample}"
 exp_id = get_experiment_id()
 mode = "test"
 
-# Parallel/batch parameters
-API_BATCH = 32
 
-# Candidate pool = 1 GT + N_NEG, defaults to 9; adjustable via the CAND_NUM environment variable
-N_NEG = int(os.environ.get("CAND_NUM", 10)) - 1
+# Candidate pool = 1 GT + N_NEG, derived from config.candidate_num
+N_NEG = candidate_num - 1
 
 # Log directory
 log_dir = LOG_ROOT / f"exp_{exp_id}"
@@ -244,29 +242,41 @@ if __name__ == "__main__":
     all_item_ids = [iid for iid in itemDF["parent_asin"].unique().tolist() if iid in item_map]
     print(f"Global item pool size: {len(all_item_ids)}")
 
-    # --- Generate/load random.csv (SASRec recalls 100) ---
+    # --- Generate random.csv (SASRec recalls `candidate_num` items every run, no caching) ---
     random_csv_path = str(
         DATASET_ROOT / "user_item_data" / f"{domain}_{num_users_to_sample}" / "random.csv"
     )
-    if not os.path.exists(random_csv_path):
-        print(f"Generating recalled items to {random_csv_path}...")
-        os.makedirs(os.path.dirname(random_csv_path), exist_ok=True)
-        all_users = interDF["user_id"].unique().tolist()
-        with open(random_csv_path, "w", encoding="utf-8") as f:
-            for i in tqdm(range(0, len(all_users), 10), desc="Generating Recall"):
-                batch_users = all_users[i:i+10]
-                scores_df = sasrec_model.get_user_item_score(
-                    sasrec_data, batch_users, all_item_ids, user_map, item_map, batch_size=len(batch_users)
-                )
-                for uid in batch_users:
-                    # scores_df is a wide table: user_id, item_id1, item_id2, ...
-                    user_row = scores_df[scores_df['user_id'] == uid].iloc[0]
-                    # Drop user_id column; the rest are item_id: score
-                    item_scores = user_row.drop('user_id')
-                    # Sort and take the top 100 item IDs
-                    top_100 = item_scores.sort_values(ascending=False).head(max(100, N_NEG + 1)).index.tolist()
-                    f.write(f"{uid}\t{' '.join([str(i) for i in top_100])}\n")
-        print("Generation complete.")
+    print(f"Generating recalled items to {random_csv_path} (candidate_num={candidate_num}) ...")
+    os.makedirs(os.path.dirname(random_csv_path), exist_ok=True)
+    all_users = interDF["user_id"].unique().tolist()
+    # Build user_id -> target_itemId mapping (keep the first interaction per user)
+    user_to_target = (
+        interDF.drop_duplicates(subset=["user_id"], keep="first")
+               .set_index("user_id")["parent_asin"].astype(str).to_dict()
+    )
+    with open(random_csv_path, "w", encoding="utf-8") as f:
+        for i in tqdm(range(0, len(all_users), 10), desc="Generating Recall"):
+            batch_users = all_users[i:i+10]
+            scores_df = sasrec_model.get_user_item_score(
+                sasrec_data, batch_users, all_item_ids, user_map, item_map, batch_size=len(batch_users)
+            )
+            for uid in batch_users:
+                # scores_df is a wide table: user_id, item_id1, item_id2, ...
+                user_row = scores_df[scores_df['user_id'] == uid].iloc[0]
+                # Drop user_id column; the rest are item_id: score
+                item_scores = user_row.drop('user_id')
+                # SASRec recalls `candidate_num` items
+                top_cand = item_scores.sort_values(ascending=False).head(candidate_num).index.tolist()
+                top_cand = [str(x) for x in top_cand]
+                target_iid = str(user_to_target.get(uid, ""))
+                if target_iid and target_iid in top_cand:
+                    # If target is hit, exclude target and keep the remaining candidate_num-1 as negatives
+                    negatives = [iid for iid in top_cand if iid != target_iid]
+                else:
+                    # Otherwise take the top candidate_num-1 as negatives
+                    negatives = top_cand[:candidate_num - 1]
+                f.write(f"{uid}\t{' '.join(negatives)}\n")
+    print("Generation complete.")
     
     user_to_recalled_items = {}
     with open(random_csv_path, "r", encoding="utf-8") as f:

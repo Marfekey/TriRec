@@ -9,8 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
 
 # --- Parallelism ---
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", 16))
-API_BATCH = int(os.getenv("API_BATCH", 64))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", 36))
+API_BATCH = int(os.getenv("API_BATCH", 32))
 
 _API_KEY = os.getenv("OPENAI_API_KEY", "")
 _BASE_URL = os.getenv("OPENAI_BASE_URL", "").strip() or None
