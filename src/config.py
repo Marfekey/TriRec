@@ -23,7 +23,6 @@ BASELINES_ROOT = PROJECT_ROOT / "baselines"
 # ---------------------------------------------------------------------------
 DOMAIN = "CDs"
 num_users_to_sample = 2000
-n_random_item = 100
 
 domain_main_category_dict = {
     "goodreads_books_young_adult": "Goodreads_YA",

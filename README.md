@@ -1,20 +1,22 @@
 # TriRec
 
-**Tri-party LLM-agent Recommendation Framework** that explicitly coordinates
-three parties — users, items, and the platform — through agent-based
-regulation of exposure and fairness.
+**Tri-party LLM-agent Recommendation Framework** (TriRec) that explicitly coordinates user utility, item exposure, and platform-level fairness
+
+## Framework
+
+![TriRec Framework](figure/framework.pdf)
 
 ## Overview
 
 TriRec is a two-stage pipeline built on LLM agents:
 
-- **Stage 1 — Generative Item Self-Promotion.** Item agents are no longer
+- **Stage 1: Generative item self-promotion.** Item agents are no longer
   passive candidates. Given a target user's interest preference, each item
   agent generates a personalized promotion (e.g., the same CD player may
   emphasize *"high audio fidelity"* to musicians, *"popular tracks"* to
   students, or *"easy audio playback"* to seniors). This improves matching
   quality and provides long-tail items with opportunities to gain exposure.
-- **Stage 2 — Platform-led Multi-Objective Re-Ranking.** A platform agent
+- **Stage 2: Platform-led multi-objective re-ranking.** A platform agent
   performs *sequential* re-ranking over the Stage-1 candidate list. For each
   position, it jointly considers (i) immediate user relevance,
   (ii) platform-level fairness, and (iii) expected item utility, balancing
@@ -22,10 +24,9 @@ TriRec is a two-stage pipeline built on LLM agents:
 
 **Candidate construction.** We follow a leave-one-out protocol. For each test
 instance, the candidate set contains 1 ground-truth item and `n` hard
-negatives sampled from the top-100 retrieved by a **pre-trained SASRec**
-retriever (not uniform random), yielding a realistic and challenging
-evaluation setting. Default `n = 9` (|C_u| = 10), consistent with established
-agent-based recommendation studies.
+negatives retrieved by a **pre-trained SASRec** retriever, yielding a realistic and challenging evaluation setting. Default
+`n = 9` (|C_u| = 10), consistent with established agent-based recommendation
+studies.
 
 ## Repository Layout
 
