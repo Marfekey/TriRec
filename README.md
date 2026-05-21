@@ -4,7 +4,7 @@
 
 ## Framework
 
-![TriRec Framework](figure/framework.png)
+![TriRec Framework](figure/frame.png)
 
 ## Overview
 
