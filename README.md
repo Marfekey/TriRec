@@ -8,7 +8,7 @@
 
 ## Overview
 
-TriRec is a two-stage pipeline built on LLM agents:
+TriRec is a two-stage pipeline:
 
 - **Stage 1: Generative item self-promotion.** Item agents are no longer
   passive candidates. Given a target user's interest preference, each item
@@ -16,7 +16,7 @@ TriRec is a two-stage pipeline built on LLM agents:
   emphasize *"high audio fidelity"* to musicians, *"popular tracks"* to
   students, or *"easy audio playback"* to seniors). This improves matching
   quality and provides long-tail items with opportunities to gain exposure.
-- **Stage 2: Platform-led multi-objective re-ranking.** A platform agent
+- **Stage 2: Platform-led multi-objective re-ranking.** The platform
   performs *sequential* re-ranking over the Stage-1 candidate list. For each
   position, it jointly considers (i) immediate user relevance,
   (ii) platform-level fairness, and (iii) expected item utility, balancing

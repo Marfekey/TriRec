@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# TriRec Stage 2. The platform agent
-# ranks candidates sequentially (one position at a time), balancing immediate
+# TriRec Stage 2: Platform sequential re-ranking.
+# Ranks candidates sequentially (one position at a time), balancing immediate
 # user relevance, platform-level fairness, and expected item utility.
 #
 # Usage:
