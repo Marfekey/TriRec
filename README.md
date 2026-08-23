@@ -28,6 +28,28 @@ negatives retrieved by a **pre-trained SASRec** retriever, yielding a realistic 
 `n = 9` (|C_u| = 10), consistent with established agent-based recommendation
 studies.
 
+## Case Study
+
+![Case study: cold-start item re-ranking](figure/case_study.png)
+
+A worked example of the Stage-1 pipeline on a **cold-start** item
+(`B004X1M4DS`, *The Book of Mormon*) that had **zero exposure** in the training
+set and therefore entered the candidate list at rank 10.
+
+1. **User agent profile.** The user prefers Broadway and vocal music,
+   particularly original cast recordings, and dislikes older styles.
+2. **Item agent promotions.** Each of the 10 candidates writes its own ad copy
+   conditioned on that profile. The cold-start item highlights the attributes
+   that actually match the user (original cast recording, theatrical
+   storytelling), rather than relying on historical popularity.
+3. **User agent scoring.** The user agent scores all candidates on a 0-10 scale
+   and gives a rationale, ranking the target item first (9.5).
+
+Because the ranking is driven by semantic alignment instead of interaction
+history, an item with no exposure can still reach the top position — this is the
+mechanism by which self-promotion opens up exposure opportunities for long-tail
+and cold-start items.
+
 ## Repository Layout
 
 ```
@@ -106,23 +128,48 @@ Edit `src/config.py`:
 | `num_users_to_sample` | `2000` | Number of sampled users |
 | `candidate_num` | `10` | Stage-1 candidate set size `|C_u|` (ground-truth + hard negatives) |
 | `model` | `"gpt-4o-mini"` | LLM backbone |
+| `PROMO_MODE` | `"full"` | Promotion mode, see below |
+| `MEMORY_UPDATE_ENABLED` | `False` | Promotion-feedback item memory update |
+| `MEMORY_UPDATE_BUFFER` | `3` | Feedback entries buffered per item before one integration |
+
+### Promotion modes (`PROMO_MODE`)
+
+| Mode | Item-side input | User-side input | Ablates |
+| --- | --- | --- | --- |
+| `full` | LLM-enriched item memory | real user profile | — (main method) |
+| `grounded` | verifiable catalog attributes only | real user profile | factuality constraint |
+| `generic` | LLM-enriched item memory | constant placeholder | personalization |
+| `none` | raw metadata, no LLM call | n/a | the promotion mechanism itself |
+
+Note that `grounded` keeps personalization intact; it only restricts which facts
+may be asserted. `generic` is the ablation of the personalization condition.
+
+### Promotion-feedback item memory update
+
+When `MEMORY_UPDATE=1`, after each scoring round an item folds the user agent's
+feedback back into its own memory, so later rounds emphasize the angles that
+worked. Feedback is buffered per item and integrated by one LLM call once
+`MEMORY_UPDATE_BUFFER` entries accumulate; the files under
+`memory/<domain>_<n>/item/` are **modified in place**.
+
+The signal is only the *relative tier* implied by the user agent's own scores
+(top third / bottom third); no ground-truth label is used, since the candidate
+set is 1 positive + N negatives and using the label would leak the test signal.
+
+Disabled by default. Under the offline protocol the candidate pool is frozen, so
+each item receives too few feedback events for the update to take effect; in our
+runs it produced no significant gain (ΔNDCG@10 = −0.003, 95% CI [−0.015,
++0.011], n = 900 paired users).
+
+```bash
+export MEMORY_UPDATE=1                     # enable
+export MEMORY_UPDATE_BUFFER=3              # entries per integration
+bash scripts/04_stage1_recall.sh
+```
 
 Runtime environment variables: `OPENAI_API_KEY`,
 `MAX_WORKERS`, `CAND_NUM`, `EXPERIMENT_ID`, `CUDA_VISIBLE_DEVICES`,
-`SBERT_MODEL_PATH`.
-
-## Citation
-
-If you find this work helpful, please cite:
-
-```bibtex
-@article{trirec2026,
-  title={Breaking User-Centric Agency: A Tri-Party Framework for Agent-Based Recommendation},
-  author={Gong, Yaxin and Gao, Chongming and Fan, Chenxiao and Wang, Wenjie and Feng, Fuli and He, Xiangnan},
-  journal={arXiv preprint arXiv:2603.10673},
-  year={2026}
-}
-```
+`SBERT_MODEL_PATH`, `PROMO_MODE`, `MEMORY_UPDATE`, `MEMORY_UPDATE_BUFFER`.
 
 ## License
 

@@ -1,3 +1,169 @@
+"""Prompt templates for TriRec.
+
+This file holds two independent groups of templates:
+
+1. TriRec main pipeline (Stage 1)
+   ``item_agent_prompt`` / ``item_agent_prompt_grounded`` / ``user_agent_prompt`` /
+   ``memory_integration_prompt``.  These are the templates actually used by
+   ``TriRec_stage1_recall.py`` at inference time.
+
+2. Offline AgentCF collaborative reflection
+   ``user_prompt_*`` / ``item_prompt_*`` / ``system_prompt_template``.  These are
+   used by ``AgentCF.py`` during the offline, label-supervised memory
+   construction stage, and are independent of the main pipeline.
+"""
+
+# =============================================================================
+# 1. TriRec MAIN PIPELINE (Stage 1)
+# =============================================================================
+
+
+def item_agent_prompt(item_title, item_description, user_description):
+    """Item agent: generate a personalized promotion from item memory.
+
+    Used by ``PROMO_MODE`` in {"full", "generic"}.  In the ``generic`` setting the
+    caller passes ``GENERIC_USER_DESC`` instead of a real user profile, which
+    ablates the personalization condition while keeping the promotion mechanism.
+    """
+    return f"""You are a product promotion agent. Your task is to create a short but appealing ad copy for the following product, highlighting its strengths and features.
+
+Product Title: {item_title}
+Product Description: {item_description}
+
+Target User Preferences: {user_description}
+
+Please create an ad copy of no more than 50 words, focusing on how this product meets the user's preferences. 
+Avoid exaggerated marketing language, and base the ad on the actual features of the product and the specific preferences of the user.
+
+Output format: Only output the ad copy itself, without any additional explanation or formatting."""
+
+
+def item_agent_prompt_grounded(item_title, verifiable_attrs, user_description):
+    """Grounded variant: only verifiable catalog attributes may be asserted.
+
+    Used by ``PROMO_MODE == "grounded"``.  Two differences from
+    ``item_agent_prompt``: (a) the factual source is the raw catalog record
+    instead of the LLM-enriched item memory, so hallucinations cannot propagate
+    from an earlier generation step; (b) claim types observed in the factuality
+    audit are explicitly forbidden.  Personalization is preserved: the real user
+    profile is still supplied and the copy is still aligned to it.
+    """
+    return f"""You are a product promotion agent. Write a short, appealing ad copy for the product below.
+
+Product Title: {item_title}
+Verifiable Catalog Attributes (the ONLY facts you may assert):
+{verifiable_attrs}
+
+Target User Preferences: {user_description}
+
+STRICT GROUNDING RULES:
+- You may only state facts that appear in the Verifiable Catalog Attributes above.
+- Do NOT claim anything about audio quality, remastering, sound engineering, bonus tracks,
+  specific track names, editions, limited/exclusive status, collectibility, curation,
+  chart history, or awards. None of these are verifiable.
+- Do NOT invent a physical format beyond what the Categories field states.
+- You may connect the listed genre/category to the user's stated preferences.
+- Subjective enthusiasm is allowed, but must not imply unverified attributes.
+
+Write no more than 50 words, focusing on how the verifiable attributes match the user's preferences.
+
+Output format: Only output the ad copy itself, without any additional explanation or formatting."""
+
+
+def user_agent_prompt(user_description, item_ads_list, retry_hint=""):
+    """User agent: score every candidate on a 0-10 scale and return strict JSON.
+
+    ``retry_hint`` is injected when validation fails, feeding the concrete error
+    (duplicated / missing IDs) back to the model.
+    """
+    items_text = "\n".join([
+        f"{i+1}. ID: {item['id']} | Title: {item['title']} | Ad: {item['ad']}"
+        for i, item in enumerate(item_ads_list)
+    ])
+
+    hint_block = f"\n{retry_hint}\n" if retry_hint else ""
+
+    return f"""You are an Amazon shopper with the following preferences and dislikes:
+
+{user_description}
+
+Here are several candidate items (each includes ID, Title, and Ad Copy):
+
+{items_text}
+{hint_block}
+Your task:
+1. Rank **all** of them according to your preferences — **use every ID exactly once** (no omission, no repetition).
+2. Rank them from most to least preferred.
+3. Give each item a **Relevance Score** between **0 and 10**, using a **nonlinear, human-like scale**:
+   - 9–10: Perfectly fits your preferences, you would almost certainly buy it.
+   - 0: Completely irrelevant or opposite to your taste.
+4. The score distribution should be **nonlinear**:
+   - Only a few items should get scores above 8.
+   - A few should be clearly low (0–2).
+5. Output the result in **strict JSON** format only, no extra text or explanation.
+
+JSON output format (very important):
+{{
+  "scores": [
+    {{"id": "ITEM_ID_1", "score": FLOAT}},
+    {{"id": "ITEM_ID_2", "score": FLOAT}},
+    ...
+  ],
+  "reason": "Brief explanation why you gave these scores"
+}}
+
+Rules:
+- Use every ID exactly once.
+- Use only the IDs listed above (do not invent or modify any).
+- The list must contain exactly {len(item_ads_list)} IDs.
+- The 'score' field must be numeric (0–10).
+- Do not output markdown or commentary outside the JSON.
+- The output will be automatically validated — if any duplication or missing ID is found, your response will be considered invalid."""
+
+
+def memory_integration_prompt(item_title, current_memory, feedback_entries):
+    """Promotion-feedback item memory update: fold promotion outcomes into memory.
+
+    Distinct from AgentCF collaborative reflection: that stage is offline,
+    label-supervised and updates both user and item side; this mechanism is
+    online, label-free and item-side only, and its signal comes from the
+    platform's own ranking outcome.
+
+    Constraints:
+    - Feedback is derived solely from the relative tier assigned by the user
+      agent; **no ground-truth label is used**.
+    - Audiences must be referred to collectively, consistent with note 3 of
+      ``item_prompt_template``.
+    - Output stays within 50 words to match the existing item memory format.
+    """
+    feedback_text = "\n".join([
+        f"- Audience: {e['user_group']} | Angle used: {e['selling_point']} | Outcome: {e['outcome']}"
+        for e in feedback_entries
+    ])
+
+    return f"""You are maintaining the promotional profile of a product based on how well its past ad copies performed with different audiences.
+
+Product Title: {item_title}
+
+Current profile:
+{current_memory}
+
+Recent promotion outcomes:
+{feedback_text}
+
+Your task: rewrite the profile so that future ad copies emphasize the angles that worked and avoid those that did not.
+
+Rules:
+- No more than 50 words, a single paragraph, no bullet points and no headings.
+- Keep the factual product attributes from the current profile; do not invent new attributes.
+- Refer to audiences collectively (e.g. "listeners who prefer ..."), never as a specific individual.
+- Output only the rewritten profile text, without explanation or quotation marks."""
+
+
+# =============================================================================
+# 2. OFFLINE AgentCF COLLABORATIVE REFLECTION
+# Used by AgentCF.py to build user / item memory before the main pipeline runs.
+# =============================================================================
 
 
 def user_prompt_system_role(user_description):
@@ -18,62 +184,3 @@ def item_prompt_template_true(user_description, list_of_item_description, pos_it
 
 def system_prompt_template(user_description, list_of_item_description):
     return f"You are an Amazon buyer. Here is your self-introduction, expressing your preferences and dislikes: '{user_description}'. \n\n Now, you are considering selecting an item from two candidates. The features of these items are:\n {list_of_item_description}.\n\n Please select the item that aligns best with your preferences and explain your choice while rejecting the other. \n Follow these steps:\n 1. Extract your preferences and dislikes from your self-introduction. \n 2. Evaluate the two items based on your preferences and how they relate to the item features.\n 3. Explain your choice, detailing the relationship between your preferences/dislikes and the item features. \n\n Important notes:\n 1. **Output Format:** 'Choice: [Title of the selected item] \\n Explanation: [Rationale behind your choice and reasons for rejecting the other item]'. \n 2. Do not fabricate your preferences! If your self-introduction lacks relevant details, use common knowledge to guide your decision, such as item popularity. \n 3. Select one candidate, not both. \n 4. Your explanation should be specific; general preferences like genre are insufficient. Focus on the item's finer attributes and be concise! \n 5. Base your explanation on facts. If your self-introduction doesn't specify preferences, you cannot claim your decision was influenced by them."
-
-def system_prompt_template_evaluation_basic(user_description, candidate_num, example_list_of_item_description):
-    return f"I am an Amazon buyer. Here is my self-introduction, which includes my preferences and dislikes:\n\n '{user_description}'. \n\n Now, I am looking for items that match my preferences from {candidate_num} candidates. The features of these items are as follows:\n {example_list_of_item_description}. \n\n Please rearrange these items based on my preferences and dislikes by following these steps:\n 1. Analyze my preferences and dislikes from my self-introduction. \n 2. Compare the candidate items according to my preferences, then make a recommendation. \n 3. **Output Format: Your ranking result must follow this format:** 'Rank: {{1. item title \\n 2. item title ...}}.' \n Note: List each item title on a new line."
-
-def system_prompt_template_evaluation_basic_g(user_description, candidate_num, example_list_of_item_description, group_Mem_txt):
-    return f"""I am an Amazon buyer. Here is my self-introduction, which includes my preferences and dislikes:
-
-'{user_description}'. {group_Mem_txt} 
-
-Now, I am looking for items that match my preferences from {candidate_num} candidates. 
-The features of these items are as follows (each line includes item id, title, and description):
-
-{example_list_of_item_description} 
-
-Please rearrange these items based on my preferences and dislikes by following these steps:
-1. Analyze my preferences and dislikes from my self-introduction.  
-2. Compare the candidate items according to my preferences, then make a recommendation.  
-3. Consider the recent interactions and choices of users with similar tastes, as their preferences may influence mine.  
-4. Please re-rank the items based on their relevance to the user profile. Do not simply return the original list.
-
-**Output Format (must be strictly followed):**  
-Rank: {{
-1. item_id - item title  
-2. item_id - item title  
-...  
-}}  
-
-Note:  
-- Use exactly the `item_id` and `title` shown above.  
-- Each ranked item must be on a new line.  
-- Do not invent or modify ids or titles.  
-- The user might be critical in reviews, but they have a high engagement with the following types of games. Predict the next item they will purchase, even if they might critique it later.
-"""
-
-
-def system_prompt_template_evaluation_sequential(user_description, historical_interactions, candidate_num, example_list_of_item_description):
-    return f"I am an Amazon buyer. Here is my self-introduction, exhibiting my preferences and dislikes: '{user_description}'. Additionally, here is my purchasing history: \n {historical_interactions}. \n\n Now, I want to find items that match my preferences from {candidate_num} candidates. The features of these candidate items are as follows:\n {example_list_of_item_description}. \n\n Please rearrange these items based on my preferences and dislikes. To do this, follow these steps:\n 1. Analyze my preferences and dislikes from my self-introduction. \n 2. Compare the candidate items according to my preferences, and make a recommendation. Consider how these items relate to my previous purchases. \n 3. Please output your recommendation in the following format: 'Rank: {{1. item title \\n 2. item title ...}}.' \n Note that the rank list should be separated by line breaks."
-
-def system_prompt_template_evaluation_sequential_g(user_description, historical_interactions, candidate_num, example_list_of_item_description, group_Mem_txt):
-    return f"I am an Amazon buyer. Here is my self-introduction, exhibiting my preferences and dislikes: '{user_description}'. Additionally, here is my purchasing history: \n {historical_interactions}. {group_Mem_txt} \n\n Now, I want to find items that match my preferences from {candidate_num} candidates. The features of these candidate items are as follows:\n {example_list_of_item_description}. \n\n Please rearrange these items based on my preferences and dislikes. To do this, follow these steps:\n 1. Analyze my preferences and dislikes from my self-introduction. \n 2. Compare the candidate items according to my preferences, and make a recommendation. Consider how these items relate to my previous purchases. \n 3. Please output your recommendation in the following format: 'Rank: {{1. item title \\n 2. item title ...}}.' \n Note that the rank list should be separated by line breaks."
-
-def system_prompt_template_evaluation_retrieval(user_past_description, user_description, candidate_num, example_list_of_item_description):
-    return f"I am an Amazon buyer. Here is my previous self-introduction, showing my past preferences and dislikes: '{user_past_description}'.\n\n Recently, I encountered some items and updated my self-introduction: '{user_description}'. \n\n Now, I want to find items that match my preferences from {candidate_num} candidates. The features of these items are as follows:\n {example_list_of_item_description}. \n\n Please rearrange these items based on my preferences and dislikes. To do this, follow these steps:\n 1. Analyze my past preferences from my previous self-introduction. \n 2. Analyze my current preferences from my updated self-introduction. \n 3. Compare the candidate items and assess their relationships to my preferences and dislikes. Rearrange them based on your analysis. \n 4. Generate your output in the following format: 'Rank: {{1. item title \\n 2. item title ...}}.' \n Note that the rank list should be separated by line breaks. \n\n Important note:\n When recommending items, prioritize my current preferences. However, my past preferences are also valuable. If unsure, refer to my past preferences and dislikes."
-
-def system_prompt_template_evaluation_retrieval_g(user_past_description, user_description, candidate_num, example_list_of_item_description, group_Mem_txt):
-    return f"I am an Amazon buyer. Here is my previous self-introduction, showing my past preferences and dislikes: '{user_past_description}'.\n\n Recently, I encountered some items and updated my self-introduction: '{user_description}'. \n\n {group_Mem_txt} Now, I want to find items that match my preferences from {candidate_num} candidates. The features of these items are as follows:\n {example_list_of_item_description}. \n\n Please rearrange these items based on my preferences and dislikes. To do this, follow these steps:\n 1. Analyze my past preferences from my previous self-introduction. \n 2. Analyze my current preferences from my updated self-introduction. \n 3. Compare the candidate items and assess their relationships to my preferences and dislikes. Rearrange them based on your analysis. \n 4. Generate your output in the following format: 'Rank: {{1. item title \\n 2. item title ...}}.' \n Note that the rank list should be separated by line breaks. \n\n Important note:\n When recommending items, prioritize my current preferences. However, my past preferences are also valuable. If unsure, refer to my past preferences and dislikes."
-
-def get_user_tag_prompt(user_description):
-    return f"Please analyze the following self-description of a user and extract multiple interest tags based on their preferences and interests. \n\nSelf-description:{user_description} \n\nOutput the tags in valid JSON format without any extra Markdown or code block indicators. Output format example: \n\n {{\"interest_tags\":[tag1, tag2, ...]}}"
-
-
-def get_call_llm_for_summary(tag_list):
-    return f"Please analyze the following self-description of a user and extract multiple interest tags specifically highlighting their preferences and interests related to the distinctive styles and features of products. \n\nTag list: {tag_list}\n\nInstructions:\n1. The output must be a single phrase. Do not include sentences, lists, or other formats.\n2. The phrase should be as concise and accurate as possible in summarizing all the tags.\n3. There is no need to explain or provide additional information. Just give the summary phrase."
-
-def groupMem_summary(group_Mem_txt):
-    return f"Please summarize the following group memories and output the results. Text to be summarized: {group_Mem_txt} \nRequirements:\n1.Summarize the text to ensure concise. 2. Ensure that the rewrite maintains the core points of the group memories.\n3. Highlight the recent preferences of users in different interest groups to ensure the summary is representative.\n4. Follow the output format example: 'Users who have similar preferences to me in ... recently ...,' and ensure that the rewritten results are uniformly formatted.\n5. If necessary, enhance the content with your own understanding and analysis to enrich the summary."
-
-def baseline_llmrank(user_his_text, recent_item, recall_budget, candidate_text_order):
-    return f"I have purchased items like: {user_his_text}. Now, take a look at these {recall_budget} products: {candidate_text_order}. Could you provide a ranking for these items based on the history? Please format it as 'Rank: {{1. item title \\n 2. item title ... \\n 10. item title}}.' Remember: 1. use only the information given and avoid making any assumptions about the products, 2. just provide the final output, 3. ensure the rank list is clearly separated by line breaks."

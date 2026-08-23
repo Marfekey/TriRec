@@ -41,6 +41,60 @@ prompt_strategy = "B"
 evaluation_times = 1
 
 # ---------------------------------------------------------------------------
+# 2.1 Stage-1 item promotion mode
+# ---------------------------------------------------------------------------
+#   full     : personalized self-promotion targeted at the user (default, main method)
+#   grounded : promotion restricted to verifiable catalog attributes
+#              (ablates factuality, keeps personalization)
+#   generic  : non-personalized promotion, the user profile is replaced by a
+#              constant (ablates the personalization condition)
+#   none     : no promotion is generated; the raw item metadata text is used
+#              (ablates the promotion mechanism itself, and skips the item-agent
+#              LLM calls entirely)
+PROMO_MODE = os.environ.get("PROMO_MODE", "full").strip().lower()
+GENERIC_USER_DESC = (
+    "a general audience with diverse tastes and no specific stated preferences"
+)
+
+def verifiable_attrs(row) -> str:
+    """Build the "verifiable attributes" text used by ``PROMO_MODE=grounded``.
+
+    Only objective catalog fields are taken; no LLM-generated content is
+    included, so hallucinations cannot propagate from an earlier stage.
+    """
+    def g(key: str, default: str = "N/A") -> str:
+        try:
+            v = row.get(key)
+            return default if v is None or str(v).strip() in ("", "nan", "None") else str(v).strip()
+        except Exception:
+            return default
+
+    return (
+        f"Categories: {g('categories')}\n"
+        f"Store/Artist: {g('store')}\n"
+        f"Subtitle: {g('subtitle')}\n"
+        f"Price: {g('price')}\n"
+        f"Average rating: {g('average_rating')} from {g('rating_number')} ratings"
+    )
+
+# ---------------------------------------------------------------------------
+# 2.2 Promotion-feedback item memory update
+# ---------------------------------------------------------------------------
+# After each scoring round, an item can fold the user agent's feedback back into
+# its own memory, so later rounds emphasize the angles that worked.  The signal
+# is the relative tier assigned by the user agent only; no ground-truth label is
+# used (the candidate set is 1 positive + N negatives, so using the label would
+# leak the test signal).  Disabled by default: under the offline protocol the
+# candidate pool is frozen and each item receives too few feedback events for the
+# update to take effect.
+MEMORY_UPDATE_ENABLED = os.environ.get("MEMORY_UPDATE", "0") == "1"
+# Number of feedback entries buffered per item before one LLM integration fires.
+MEMORY_UPDATE_BUFFER = int(os.environ.get("MEMORY_UPDATE_BUFFER", "3"))
+# Integration results longer than this many words are treated as malformed and
+# discarded, keeping the original memory.
+MEMORY_UPDATE_MAX_WORDS = int(os.environ.get("MEMORY_UPDATE_MAX_WORDS", "80"))
+
+# ---------------------------------------------------------------------------
 # 3. Data paths (all based on DATASET_ROOT)
 # ---------------------------------------------------------------------------
 _USER_ITEM_ROOT = DATASET_ROOT / "user_item_data" / f"{DOMAIN}_{num_users_to_sample}"

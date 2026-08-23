@@ -10,7 +10,7 @@ import pickle
 import random
 import sys
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime
 from tqdm import tqdm
 
@@ -30,8 +30,20 @@ from config import (
     DATASET_ROOT,
     createInterDF,
     createItemDF,
+    PROMO_MODE,
+    GENERIC_USER_DESC,
+    verifiable_attrs,
+    MEMORY_UPDATE_ENABLED,
+    MEMORY_UPDATE_BUFFER,
+    MEMORY_UPDATE_MAX_WORDS,
 )
-from request import parallel_get_responses, MAX_WORKERS, API_BATCH
+from prompt import (
+    item_agent_prompt,
+    item_agent_prompt_grounded,
+    user_agent_prompt,
+    memory_integration_prompt,
+)
+from request import parallel_get_responses, get_response_from_openai, MAX_WORKERS, API_BATCH
 from fuzzywuzzy import fuzz
 
 # Import SASRec-related modules
@@ -56,6 +68,9 @@ exp_name = f"SASRec {DOMAIN}_{num_users_to_sample}"
 memory_exp_name = f"{DOMAIN}_{num_users_to_sample}"
 exp_id = get_experiment_id()
 mode = "test"
+
+# Run-level counters (promotion feedback / memory update outcomes)
+STATS = Counter()
 
 
 # Candidate pool = 1 GT + N_NEG, derived from config.candidate_num
@@ -123,7 +138,7 @@ def load_sasrec_model(model_path, maps_path, data_path, max_len=80, hidden_units
 
     # 3. Load weights
     model.load_weights(model_path)
-    print("Model loaded successfully ✅")
+    print("Model loaded successfully")
 
     # 4. Sample validation users
     print("Sampling validation users...")
@@ -133,63 +148,126 @@ def load_sasrec_model(model_path, maps_path, data_path, max_len=80, hidden_units
 
     return model, data, user_map, item_map
 
-def item_agent_prompt(item_title, item_description, user_description): 
-    """Generate the prompt for the item advertising agent."""
-    return f"""You are a product promotion agent. Your task is to create a short but appealing ad copy for the following product, highlighting its strengths and features.
+def build_ad_prompt(item_title, item_description, item_row, user_description):
+    """Dispatch to the promotion template selected by ``PROMO_MODE``.
 
-Product Title: {item_title}
-Product Description: {item_description}
+    ``none`` is handled by the caller, which skips the item-agent LLM call and
+    feeds the raw metadata text directly to the user agent.
+    """
+    if PROMO_MODE == "grounded":
+        attrs = verifiable_attrs(item_row) if item_row is not None else "N/A"
+        return item_agent_prompt_grounded(item_title, attrs, user_description)
+    if PROMO_MODE == "generic":
+        return item_agent_prompt(item_title, item_description, GENERIC_USER_DESC)
+    return item_agent_prompt(item_title, item_description, user_description)
 
-Target User Preferences: {user_description}
 
-Please create an ad copy of no more than 50 words, focusing on how this product meets the user's preferences. 
-Avoid exaggerated marketing language, and base the ad on the actual features of the product and the specific preferences of the user.
+# ---------------------------------------------------------------------------
+# Promotion-feedback item memory update
+# ---------------------------------------------------------------------------
+# The item memory files under memory/<domain>_<n>/item/ are modified in place.
+MEMORY_UPDATE_DIR = MEMORY_ROOT / memory_exp_name / "item"
+MEMORY_UPDATE_BUF = defaultdict(list)  # item_id -> [feedback entries]
 
-Output format: Only output the ad copy itself, without any additional explanation or formatting."""
+
+def summarize_user_group(user_description, max_words=25):
+    """Compress a single user's memory into a short collective description.
+
+    Consistent with note 3 of ``item_prompt_template``: user preferences may only
+    be referred to collectively, never as a specific individual.
+    """
+    text = re.sub(r"===[^=]*===", " ", str(user_description))
+    text = re.sub(r"\s+", " ", text).strip()
+    words = text.split(" ")[:max_words]
+    return "users whose profile indicates: " + " ".join(words)
 
 
-def user_agent_prompt(user_description, item_ads_list):
-    items_text = "\n".join([
-        f"{i+1}. ID: {item['id']} | Title: {item['title']} | Ad: {item['ad']}"
-        for i, item in enumerate(item_ads_list)
-    ])
+def promotion_outcome_tier(rank, total):
+    """Map a within-candidate-set rank to a promotion outcome tier.
 
-    return f"""You are an Amazon shopper with the following preferences and dislikes:
+    Only the relative tier produced by the user agent's own scores is used; no
+    ground-truth label is involved (the candidate set is 1 positive + N
+    negatives, so using the label would leak the test signal).  A relative tier
+    rather than an absolute score avoids scale drift across rounds.
+    """
+    if total <= 1:
+        return None
+    frac = rank / float(total)
+    if frac <= 1.0 / 3:
+        return "effective (ranked near the top by this audience)"
+    if frac >= 2.0 / 3:
+        return "ineffective (ranked near the bottom by this audience)"
+    return None  # the middle tier carries little signal, so it is not buffered
 
-{user_description}
 
-Here are several candidate items (each includes ID, Title, and Ad Copy):
+def flush_item_memory(item_id, item_title, entries):
+    """Run one LLM integration for a single item and overwrite its memory file.
 
-{items_text}
+    Returns True on a successful write.
+    """
+    mem_path = MEMORY_UPDATE_DIR / f"item.{item_id}"
+    try:
+        current_memory = mem_path.read_text(encoding="utf-8").strip()
+    except Exception as e:
+        print(f"Memory update: failed to read memory for {item_id}: {e}")
+        return False
 
-Your task:
-1. Rank **all** of them according to your preferences — **use every ID exactly once** (no omission, no repetition).
-2. Rank them from most to least preferred.
-3. Give each item a **Relevance Score** between **0 and 10**, using a **nonlinear, human-like scale**:
-   - 9–10: Perfectly fits your preferences, you would almost certainly buy it.
-   - 0: Completely irrelevant or opposite to your taste.
-4. The score distribution should be **nonlinear**:
-   - Only a few items should get scores above 8.
-   - A few should be clearly low (0–2).
-5. Output the result in **strict JSON** format only, no extra text or explanation.
+    updated = get_response_from_openai(
+        memory_integration_prompt(item_title, current_memory, entries), model
+    )
+    if not updated or not updated.strip():
+        return False
 
-JSON output format (very important):
-{{
-  "scores": [
-    {{"id": "ITEM_ID_1", "score": FLOAT}},
-    {{"id": "ITEM_ID_2", "score": FLOAT}},
-    ...
-  ],
-  "reason": "Brief explanation why you gave these scores"
-}}
+    new_memory = updated.strip().strip('"').strip("'")
+    if len(new_memory.split()) > MEMORY_UPDATE_MAX_WORDS:
+        # An overlong integration is treated as malformed; keep the original.
+        print(f"Memory update: result too long, skipping write for {item_id}")
+        return False
+    try:
+        mem_path.write_text(new_memory, encoding="utf-8")
+        return True
+    except Exception as e:
+        print(f"Memory update: failed to write memory for {item_id}: {e}")
+        return False
 
-Rules:
-- Use every ID exactly once.
-- Use only the IDs listed above (do not invent or modify any).
-- The list must contain exactly {len(item_ads_list)} IDs.
-- The 'score' field must be numeric (0–10).
-- Do not output markdown or commentary outside the JSON.
-- The output will be automatically validated — if any duplication or missing ID is found, your response will be considered invalid."""
+
+def record_promotion_feedback(user_description, user_agent_scores, item_ads_list):
+    """Buffer this round's feedback per item and integrate once the buffer fills."""
+    if not (MEMORY_UPDATE_ENABLED and user_agent_scores):
+        return
+    user_group = summarize_user_group(user_description)
+    total_scored = len(user_agent_scores)
+    ad_by_id = {str(it["id"]): it for it in item_ads_list}
+    for rank_idx, sc in enumerate(user_agent_scores):
+        tier = promotion_outcome_tier(rank_idx, total_scored)
+        if tier is None:
+            continue
+        ad_entry = ad_by_id.get(str(sc["id"]))
+        if not ad_entry:
+            continue
+        MEMORY_UPDATE_BUF[sc["id"]].append({
+            "user_group": user_group,
+            "selling_point": ad_entry["ad"],
+            "outcome": tier,
+            "title": ad_entry["title"],
+        })
+        STATS["n_memory_feedback"] += 1
+        if len(MEMORY_UPDATE_BUF[sc["id"]]) >= MEMORY_UPDATE_BUFFER:
+            entries = MEMORY_UPDATE_BUF.pop(sc["id"])
+            ok = flush_item_memory(sc["id"], entries[0]["title"], entries)
+            STATS["n_memory_update" if ok else "n_memory_update_failed"] += 1
+
+
+def flush_remaining_memory_updates():
+    """Integrate the residual buffers that never reached MEMORY_UPDATE_BUFFER."""
+    if not (MEMORY_UPDATE_ENABLED and MEMORY_UPDATE_BUF):
+        return
+    print(f"Memory update: flushing residual feedback for {len(MEMORY_UPDATE_BUF)} items")
+    for item_id in list(MEMORY_UPDATE_BUF.keys()):
+        entries = MEMORY_UPDATE_BUF.pop(item_id)
+        ok = flush_item_memory(item_id, entries[0]["title"], entries)
+        STATS["n_memory_update" if ok else "n_memory_update_failed"] += 1
+
 
 
 
@@ -203,6 +281,11 @@ if __name__ == "__main__":
         f.write("File Name: TriRec_stage1_recall.py\n")
         f.write(f"Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Memory Folder: {memory_folder_name}\n")
+        f.write(f"Backbone: {model}\n")
+        f.write(f"Candidate Num: {candidate_num}\n")
+        f.write(f"Promo Mode: {PROMO_MODE}\n")
+        f.write(f"Memory Update Enabled: {MEMORY_UPDATE_ENABLED}\n")
+        f.write(f"Memory Update Buffer: {MEMORY_UPDATE_BUFFER}\n")
 
     # Path setup
     domain = DOMAIN
@@ -377,29 +460,38 @@ if __name__ == "__main__":
                 for item_id in d['top_k_items']:
                     item_id = str(item_id)
                     try:
-                        matched = itemDF[itemDF["parent_asin"] == item_id]["title"]
-                        if matched.empty:
+                        rows = itemDF[itemDF["parent_asin"] == item_id]
+                        if rows.empty:
                             raise KeyError(f"item {item_id} not found in itemDF")
-                        item_title = str(matched.values[0])
+                        item_title = str(rows["title"].values[0])
                         with open(str(MEMORY_ROOT / memory_exp_name / "item" / f"item.{item_id}"), "r", encoding="utf-8") as file:
                             item_description = file.read()
-                        ad_prompts.append(item_agent_prompt(item_title, item_description, d['user_description']))
-                        ad_task_map.append((i, item_id, item_title))
+                        if PROMO_MODE != "none":
+                            ad_prompts.append(
+                                build_ad_prompt(item_title, item_description, rows.iloc[0], d['user_description'])
+                            )
+                        ad_task_map.append((i, item_id, item_title, item_description))
                     except Exception as e:
                         print(f"Failed to build ad prompt for {item_id}: {e}")
 
-            ad_responses = parallel_get_responses(ad_prompts, model, max_workers=MAX_WORKERS)
+            if PROMO_MODE == "none":
+                # No promotion is generated: the raw item metadata text is used as-is,
+                # which is exactly the "no promotion" control and saves the LLM calls.
+                ad_responses = [None] * len(ad_task_map)
+            else:
+                ad_responses = parallel_get_responses(ad_prompts, model, max_workers=MAX_WORKERS)
             
             # Organize ad results
             for i in range(len(batch_data)):
                 batch_data[i]['item_ads_list'] = []
             
-            for resp, (user_idx, item_id, item_title) in zip(ad_responses, ad_task_map):
-                if resp:
+            for resp, (user_idx, item_id, item_title, item_description) in zip(ad_responses, ad_task_map):
+                ad_text = resp.strip() if resp else str(item_description).strip()
+                if ad_text:
                     batch_data[user_idx]['item_ads_list'].append({
                         'id': item_id,
                         'title': item_title,
-                        'ad': resp.strip()
+                        'ad': ad_text
                     })
 
             # B. User ranking in parallel (User Agent)
@@ -455,6 +547,13 @@ if __name__ == "__main__":
                         print(f"  item_ads_list size: {len(d['item_ads_list'])}")
                         print(f"  raw response (first 300 chars): {str(resp)[:300] if resp else 'None'}")
                         continue
+
+                    # Promotion-feedback item memory update.
+                    # Uses only the relative tiers implied by the user agent's scores;
+                    # no ground-truth label is involved.
+                    record_promotion_feedback(
+                        d['user_description'], user_agent_scores, d['item_ads_list']
+                    )
 
                     # Stage 1 metrics (only computed when stage 2 succeeds, for a fair comparison)
                     result_list = [str(itemDF[itemDF["parent_asin"] == iid]["title"].values[0]) for iid in d['top_k_items']]
@@ -545,8 +644,15 @@ if __name__ == "__main__":
         for rec in two_stage_recommendations:
             f.write(json.dumps(convert_numpy_types(rec), ensure_ascii=False) + "\n")
 
+    # Integrate any feedback that never filled a buffer
+    flush_remaining_memory_updates()
+
     # Record end time
     end_time = datetime.now()
     with open(execution_log_path, "a", encoding="utf-8") as f:
         f.write(f"End Time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Total Duration: {end_time - start_time}\n")
+        if MEMORY_UPDATE_ENABLED:
+            f.write(f"Memory Feedback Entries: {STATS['n_memory_feedback']}\n")
+            f.write(f"Memory Updates Applied: {STATS['n_memory_update']}\n")
+            f.write(f"Memory Updates Failed: {STATS['n_memory_update_failed']}\n")
