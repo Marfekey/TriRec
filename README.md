@@ -171,6 +171,19 @@ Runtime environment variables: `OPENAI_API_KEY`,
 `MAX_WORKERS`, `CAND_NUM`, `EXPERIMENT_ID`, `CUDA_VISIBLE_DEVICES`,
 `SBERT_MODEL_PATH`, `PROMO_MODE`, `MEMORY_UPDATE`, `MEMORY_UPDATE_BUFFER`.
 
+## Citation
+
+If you find this work useful, please cite:
+
+```bibtex
+@article{trirec2026,
+  title={Breaking User-Centric Agency: A Tri-Party Framework for Agent-Based Recommendation},
+  author={Gong, Yaxin and Gao, Chongming and Fan, Chenxiao and Wang, Wenjie and Feng, Fuli and He, Xiangnan},
+  journal={arXiv preprint arXiv:2603.10673},
+  year={2026}
+}
+```
+
 ## License
 
 For academic research only.

@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you find this work useful, please cite it as below."
+preferred-citation:
+  type: article
+  title: "Breaking User-Centric Agency: A Tri-Party Framework for Agent-Based Recommendation"
+  authors:
+    - family-names: Gong
+      given-names: Yaxin
+    - family-names: Gao
+      given-names: Chongming
+    - family-names: Fan
+      given-names: Chenxiao
+    - family-names: Wang
+      given-names: Wenjie
+    - family-names: Feng
+      given-names: Fuli
+    - family-names: He
+      given-names: Xiangnan
+  journal: "arXiv preprint arXiv:2603.10673"
+  year: 2026
