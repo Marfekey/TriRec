@@ -73,8 +73,13 @@ Output format: Only output the ad copy itself, without any additional explanatio
 def user_agent_prompt(user_description, item_ads_list, retry_hint=""):
     """User agent: score every candidate on a 0-10 scale and return strict JSON.
 
-    ``retry_hint`` is injected when validation fails, feeding the concrete error
-    (duplicated / missing IDs) back to the model.
+    Realizes the ranking operator of Eq. 5: the returned scores are sorted in
+    descending order to form the Stage-1 list, and the same scores are consumed
+    as r_LLM(u, i) by the Stage-2 platform utility model.
+
+    ``retry_hint`` carries the concrete validation error (duplicated or omitted
+    identifiers) back to the model when a malformed or incomplete reply is
+    re-queried.
     """
     items_text = "\n".join([
         f"{i+1}. ID: {item['id']} | Title: {item['title']} | Ad: {item['ad']}"
@@ -121,42 +126,47 @@ Rules:
 - The output will be automatically validated — if any duplication or missing ID is found, your response will be considered invalid."""
 
 
-def memory_integration_prompt(item_title, current_memory, feedback_entries):
-    """Promotion-feedback item memory update: fold promotion outcomes into memory.
+def memory_integration_prompt(item_title, current_memory, promotion_entries):
+    """Item memory update of Eq. 4: fold the served promotions back into memory.
+
+    Consumes only the audience representation each promotion was conditioned on
+    and the generated text itself, so the memory records which kinds of users the
+    item has addressed and how, letting later promotions build on earlier
+    phrasing instead of restating the metadata.  Neither the ground-truth
+    interaction nor the realized ranking is available here, so no test signal can
+    enter the memory.
 
     Distinct from AgentCF collaborative reflection: that stage is offline,
-    label-supervised and updates both user and item side; this mechanism is
-    online, label-free and item-side only, and its signal comes from the
-    platform's own ranking outcome.
+    label-supervised and updates both the user and the item side; this mechanism
+    is online, label-free and item-side only.
 
     Constraints:
-    - Feedback is derived solely from the relative tier assigned by the user
-      agent; **no ground-truth label is used**.
     - Audiences must be referred to collectively, consistent with note 3 of
       ``item_prompt_template``.
     - Output stays within 50 words to match the existing item memory format.
     """
-    feedback_text = "\n".join([
-        f"- Audience: {e['user_group']} | Angle used: {e['selling_point']} | Outcome: {e['outcome']}"
-        for e in feedback_entries
+    promotions_text = "\n".join([
+        f"- Audience: {e['audience']} | Angle used: {e['promotion']}"
+        for e in promotion_entries
     ])
 
-    return f"""You are maintaining the promotional profile of a product based on how well its past ad copies performed with different audiences.
+    return f"""You are maintaining the promotional profile of a product, based on the audiences it has recently addressed and the angles it used with them.
 
 Product Title: {item_title}
 
 Current profile:
 {current_memory}
 
-Recent promotion outcomes:
-{feedback_text}
+Recently served promotions:
+{promotions_text}
 
-Your task: rewrite the profile so that future ad copies emphasize the angles that worked and avoid those that did not.
+Your task: rewrite the profile so that it records which kinds of audiences this product has addressed and which angles it used, so that future ad copies can build on that phrasing instead of restating the metadata.
 
 Rules:
 - No more than 50 words, a single paragraph, no bullet points and no headings.
 - Keep the factual product attributes from the current profile; do not invent new attributes.
 - Refer to audiences collectively (e.g. "listeners who prefer ..."), never as a specific individual.
+- Do not state or imply that any angle succeeded or failed; no such information is available.
 - Output only the rewritten profile text, without explanation or quotation marks."""
 
 

@@ -172,7 +172,6 @@ def process_interaction(interDF, itemDF, exp_name, model):
             save_ratio = min(10, int(new_ratio))
             save_memory(str(save_ratio))
 
-# Single-domain mode no longer needs cross-domain negative sampling logic
 
 def parse_response(responseText):
     selected_item_title = re.split(r"Choice:|\n", responseText)[1]

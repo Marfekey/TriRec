@@ -40,7 +40,7 @@ class Logger:
         with open(self.log_file, 'a', encoding='utf-8') as f:
             f.write(char * length + "\n")
 
-# Added: disable log writing when this module is imported
+# Disable log writing when this module is imported
 class NullLogger:
     def log(self, message):
         pass
@@ -118,7 +118,7 @@ def load_recommendation_process_jsonl(file_path):
 
 
 # ======== Evaluation functions ========
-# Added: EIU/CTR related utilities and embedding paths
+# EIU / CTR utilities and embedding paths
 SEM_EMB_DIR = str(
     DATASET_ROOT / "user_item_data" / f"{DOMAIN}_{num_users_to_sample}" / "semantic_embeddings"
 )
@@ -215,7 +215,7 @@ def compute_ctr_probs(user_id: str, candidates: list[str], user_embs: dict, item
 
     return probs
 
-# Added: position exposure function (exposure decreases from top to bottom)
+# Position exposure function (exposure decreases from top to bottom)
 def position_bias(rank):
     return 1.0 / np.log2(rank + 1)
 
@@ -261,7 +261,7 @@ def calculate_metrics(relevance, ranked_items, target_id, eiu_values=None):
     if target_id in ranked_items:
         target_rank = ranked_items.index(target_id) + 1
     
-    # Added: EIU aggregated metrics (aligned with candidate list positions)
+    # EIU aggregated metrics (aligned with candidate list positions)
     eiu1 = eiu5 = eiu10 = None
     target_eiu = None
     if eiu_values is not None and len(eiu_values) == len(ranked_items):
@@ -280,7 +280,7 @@ def calculate_metrics(relevance, ranked_items, target_id, eiu_values=None):
         'MRR': mrr(relevance),
         'target_rank': target_rank,
         'ranked_items': ranked_items,
-        # Added: EIU metrics
+        # EIU metrics
         'EIU@1_sum': eiu1,
         'EIU@5_sum': eiu5,
         'EIU@10_sum': eiu10,
@@ -338,7 +338,7 @@ def evaluate_recommendation_process_file(file_path, exposure_path=None, user_pat
         # Record items in the full universe
         all_known_items.update(final_candidates)
 
-        # Added: parse user ID (fallback across multiple field names)
+        # Parse user ID (fallback across multiple field names)
         user_id = rec.get('user_id') or rec.get('uid') or rec.get('user') or rec.get('customer_id')
         user_id = str(user_id) if user_id is not None else None
 

@@ -78,8 +78,8 @@ def timeout(sec: int, repeat_sec: float = 1.0):
 
 # --- LLM chat ---
 @timeout(100)
-def get_response_from_openai(prompt: str, model: str, api_key: str | None = None) -> str | None:
-    """Single-turn chat; retry up to 10 times on failure. The `api_key` argument is kept for backward compatibility and is ignored."""
+def get_response_from_openai(prompt: str, model: str) -> str | None:
+    """Single-turn chat; retry up to 10 times on failure."""
     messages = [{"role": "user", "content": prompt}]
     for attempt in range(1, 11):
         try:
@@ -116,9 +116,7 @@ def parallel_get_responses(prompts: list, model: str, max_workers: int = MAX_WOR
 
 # --- Embedding ---
 @timeout(200)
-def get_embedding_from_openai(
-    text: str, model: str = "text-embedding-ada-002", api_key: str | None = None
-):
+def get_embedding_from_openai(text: str, model: str = "text-embedding-ada-002"):
     for attempt in range(1, 11):
         try:
             resp = client.embeddings.create(input=text, model=model)

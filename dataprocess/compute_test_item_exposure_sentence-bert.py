@@ -203,7 +203,7 @@ def parse_args():
         "--top_k", type=int, default=3,
         help="number of Top-K similar training items"
     )
-    # Added: device selection (e.g. cuda:0, cuda:1 or cpu)
+    # Device selection (e.g. cuda:0, cuda:1 or cpu)
     parser.add_argument(
         "--device", type=str, default="cuda:0",
         help="compute device: cuda:<idx> to specify a GPU, or cpu"
