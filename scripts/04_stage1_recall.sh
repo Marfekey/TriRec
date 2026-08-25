@@ -12,7 +12,6 @@
 #   PROMO_MODE           # (optional) full | grounded | generic | none, default full
 #                        #   the three arms of the controlled ablation are
 #                        #   none / generic / full; grounded is the fourth arm
-#   MEMORY_UPDATE        # (optional) 1 to enable the item memory update
 set -e
 cd "$(dirname "$0")/.."
 

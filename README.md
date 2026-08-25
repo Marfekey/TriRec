@@ -129,7 +129,6 @@ Edit `src/config.py`:
 | `candidate_num` | `10` | Stage-1 candidate set size `|C_u|` (ground-truth + hard negatives) |
 | `model` | `"gpt-4o-mini"` | LLM backbone |
 | `PROMO_MODE` | `"full"` | Promotion mode, see below |
-| `MEMORY_UPDATE_ENABLED` | `True` | Item memory update (Eq. 4) |
 | `MEMORY_UPDATE_BUFFER` | `3` | Promotions buffered per item before one integration |
 
 ### Promotion modes (`PROMO_MODE`)
@@ -171,17 +170,9 @@ The update consumes only the audience representation the promotion was
 conditioned on and the generated text itself. The realized ranking and the
 ground-truth interaction are never consumed, so no test signal enters memory.
 
-Enabled by default:
-
-```bash
-export MEMORY_UPDATE=0                     # freeze the item memory
-export MEMORY_UPDATE_BUFFER=3              # promotions per integration
-bash scripts/04_stage1_recall.sh
-```
-
 Runtime environment variables: `OPENAI_API_KEY`,
 `MAX_WORKERS`, `CAND_NUM`, `EXPERIMENT_ID`, `CUDA_VISIBLE_DEVICES`,
-`SBERT_MODEL_PATH`, `PROMO_MODE`, `MEMORY_UPDATE`, `MEMORY_UPDATE_BUFFER`.
+`SBERT_MODEL_PATH`, `PROMO_MODE`, `MEMORY_UPDATE_BUFFER`.
 
 ## License
 
