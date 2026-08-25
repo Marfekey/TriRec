@@ -114,7 +114,7 @@ def soft_normalize_rel(rel_scores, beta=1.0):
     return norm_rel
 
 # ==========================================================================
-# Task 3: Replaceable functions of core formulas (position weight / relevance fusion / long-tail decay)
+# Interchangeable forms of the core functions (position weight / relevance fusion / long-tail decay)
 # ==========================================================================
 def position_weight(pos: int, fn: str = "log2", K: int = 10,
                     power_p: float = 1.0, exp_k: float = 0.5) -> float:
@@ -222,42 +222,28 @@ def compute_embedding_relevance(user_id, item_ids, user_embeddings, item_embeddi
             scores.append(0.0)
     return scores
 
-def compute_DGU_MGU(counts: np.ndarray, N: float, p_train: np.ndarray):
-    eps = 1e-12
-    if N <= 0:
-        return 0.0, 0.0
-    p_rec = counts / max(N, eps)
-    diffs = np.abs(p_rec - p_train)
-    dgu = float(diffs.max() - diffs.min())
-    gaps = []
-    G = len(p_train)
-    for g1 in range(G):
-        for g2 in range(g1 + 1, G):
-            gaps.append(abs(diffs[g1] - diffs[g2]))
-    mgu = float(np.mean(gaps)) if gaps else 0.0
-    return dgu, mgu
+
 def re_rank_candidates_greedy(
     candidates,
     rel_scores,
-    ctr_scores,          
-    score_llm,
+    ctr_scores,
     alpha: float, # here alpha becomes alpha_max
     alpha_min: float, # new parameter
     alpha_p: float, # new parameter
     lambda1: float,
     lambda2: float,
-    lambda_eiu: float,    
+    lambda_item: float,
     K: int,
     group_of: dict,
     p_train: np.ndarray,
     global_counts: np.ndarray,
     global_N: float,
     rank_weights: np.ndarray,
-    exposure_dict_semantic: dict, 
-    pos_fn: str = "log2",         
+    pos_fn: str = "log2",
 ):
     """
-    Method A: incremental approximation / online greedy assignment.
+    Greedy sequential action generation (Eq. 16): the list is built top-down and
+    the exposure state is carried across rounds.
     - Greedy is applied only to the top-K positions; the rest keeps the original order.
     - Updates global_counts / global_N in real time.
     """
@@ -303,7 +289,7 @@ def re_rank_candidates_greedy(
         delta_acc_list = []
         delta_dgu_list = []
         delta_mgu_list = []
-        delta_eiu_list = [] # Added: record benefit gains
+        delta_eiu_list = []
         cand_indices = []
 
         for j, cid in enumerate(candidates):
@@ -349,25 +335,25 @@ def re_rank_candidates_greedy(
         mgu_norm = minmax_norm(delta_mgu_list)
         eiu_norm = minmax_norm(delta_eiu_list) # Normalize the benefit gain
 
-        # Check whether there are still candidate items (fallback logic to prevent 'list index must be integer or slices, not NoneType')
+        # All candidates have been placed
         if not cand_indices:
             break
 
-        # Compute total score: total marginal gain * individual fairness regulator
+        # Joint utility (Eq. 9): relevance-fairness gain * exposure-aware item utility
         best_score = -1e18
         best_idx_in_cands = None
         for k, j in enumerate(cand_indices):
-            # Total marginal gain (user gain + platform group gain + item benefit)
+            # Relevance-fairness gain g(.) (Eq. 10 with the platform term of Eq. 11):
+            # a position-aware convex combination of the normalized user utility and
+            # the normalized marginal fairness gains on DGU / MGU.
             total_marginal_gain = float(
                 alpha_pos * acc_norm[k]
                 + (1.0 - alpha_pos) * (lambda1 * dgu_norm[k] + lambda2 * mgu_norm[k])
-                 # Inject the benefit term
             )
-            # Individual fairness regulator (based on item historical semantic exposure)
-            e_i = float(exposure_dict_semantic.get(str(candidates[j]), 0.0))
-            # Total score calculation
-            score = total_marginal_gain *  (eiu_norm[k]) ** lambda_eiu
-            
+            # Exposure-aware item utility modulator (Eq. 15).  Under-exposure is not
+            # handled here; it enters only through the group-fairness term above.
+            score = total_marginal_gain * (eiu_norm[k]) ** lambda_item
+
             if score > best_score:
                 best_score = score
                 best_idx_in_cands = j
@@ -417,20 +403,20 @@ if __name__ == "__main__":
     parser.add_argument("--input_path", type=str, required=True, help="Path of the JSONL file to be reranked")
     parser.add_argument("--output_dir", type=str, default=str(LOG_VISUAL_ROOT), help="Directory to save rerank results")
 
-    # Task 2: CLI arguments for the 7 rerank hyperparameters (used for OFAT tuning)
+    # Re-ranking hyperparameters
     parser.add_argument("--K", type=int, default=int(os.environ.get("CAND_NUM", 10)), help="Top-K for rerank, defaults to CAND_NUM")
     parser.add_argument("--lambda1", type=float, default=0.5, help="DGU weight")
     parser.add_argument("--lambda2", type=float, default=0.5, help="MGU weight")
-    parser.add_argument("--lambda_item", type=float, default=10.0, help="Item benefit weight")
+    parser.add_argument("--lambda_item", type=float, default=10.0, help="Exponent lambda_item of the exposure-aware item utility (Eq. 15)")
     parser.add_argument("--alpha_min", type=float, default=0.1, help="Dynamic alpha lower bound")
     parser.add_argument("--alpha_p", type=float, default=0.1, help="Power exponent of alpha curve")
 
-    # alpha sweep range (default 0.1 ~ 1.0 step 0.05)
+    # alpha_max sweep range
     parser.add_argument("--alpha_start", type=float, default=0.1)
     parser.add_argument("--alpha_end", type=float, default=1.01)
     parser.add_argument("--alpha_step", type=float, default=0.1)
 
-    # Task 3: core formula switches
+    # Functional forms of the core terms
     parser.add_argument("--pos_fn", type=str, default="log2", choices=["log2", "power", "exp", "linear"], help="Position weight function")
     parser.add_argument("--phi_fn", type=str, default="sigmoid", choices=["exp", "sigmoid", "linear", "relu"], help="CTR/benefit baseline mapping phi(sim_emb)")
     parser.add_argument("--phi_alpha", type=float, default=1.0, help="Slope alpha when phi=sigmoid")
@@ -445,7 +431,7 @@ if __name__ == "__main__":
     base_output_dir = os.path.join(args.output_dir, exp_folder_name)
     output_dir = base_output_dir
     
-    # Added: handle duplicated folder names by automatically appending the _k suffix
+    # Append a _k suffix when the target folder already exists
     k = 1
     while os.path.exists(output_dir):
         output_dir = f"{base_output_dir}_{k}"
@@ -494,23 +480,19 @@ if __name__ == "__main__":
         exact_match = [m for m in train_matches if domain_str in m]
         train_exposure_path = exact_match[0] if exact_match else train_matches[0]
             
-        # Extract the actual filename suffix to locate the corresponding overall file
+        # Extract the actual filename suffix (also used to locate the embedding folder)
         actual_suffix = os.path.basename(train_exposure_path).replace("item_exposure_train_", "").replace(".json", "")
-        overall_exposure_path = os.path.join(exposure_folder, f"item_exposure_overall_{actual_suffix}.json")
-            
+
         logger.log(f"Dynamically located exposure files: domain={first_domain}, suffix={actual_suffix}")
     else:
         # Final fallback: fall back to the configuration from config
         fallback_domain = f"{DOMAIN}_{num_users_to_sample}"
         actual_suffix = fallback_domain
         train_exposure_path = os.path.join(exposure_folder, f"item_exposure_train_{fallback_domain}.json")
-        overall_exposure_path = os.path.join(exposure_folder, f"item_exposure_overall_{fallback_domain}.json")
         logger.log(f"Warning: exposure file matching {first_domain} not found, falling back to config: {fallback_domain}")
     
     logger.log(f"Loading training exposure data: {train_exposure_path}")
     exposure_dict = load_exposure_dict(train_exposure_path)
-    logger.log(f"Loading overall semantic exposure data: {overall_exposure_path}")
-    exposure_dict_semantic = load_exposure_dict(overall_exposure_path)
 
     # --- Load user and item embeddings ---
     embedding_dir = str(
@@ -557,7 +539,7 @@ if __name__ == "__main__":
     K = int(args.K)
     lambda1 = float(args.lambda1)
     lambda2 = float(args.lambda2)
-    lambda_eiu = float(args.lambda_item)
+    lambda_item = float(args.lambda_item)
     alpha_min = float(args.alpha_min)
     alpha_p = float(args.alpha_p)
     pos_fn = str(args.pos_fn)
@@ -572,7 +554,7 @@ if __name__ == "__main__":
         "K": K,
         "lambda1": lambda1,
         "lambda2": lambda2,
-        "lambda_eiu": lambda_eiu,
+        "lambda_item": lambda_item,
         "alpha_min": alpha_min,
         "alpha_p": alpha_p,
         "pos_fn": pos_fn,
@@ -620,7 +602,7 @@ if __name__ == "__main__":
             else:
                 original_candidates = [str(x) for x in original_candidates]
 
-            # Added: deduplicate while preserving order to avoid greedy-loop out-of-bounds
+            # Deduplicate while preserving order
             seen = set()
             dedup_candidates = []
             for cid in original_candidates:
@@ -629,13 +611,14 @@ if __name__ == "__main__":
                     seen.add(cid)
             original_candidates = dedup_candidates
 
-            # Extract LLM relevance scores: if the log has no scores, generate pseudo scores by rank (higher rank -> higher score)
+            # User-agent relevance scores r_LLM; when the Stage-1 log carries no
+            # scores, fall back to a rank-derived monotone surrogate
             user_agent_scores = rec.get("user_agent_scores") or rec.get("scores") or []
             if user_agent_scores:
                 id2score = {str(e["id"]): float(e["score"]) for e in user_agent_scores if isinstance(e, dict) and "id" in e and "score" in e}
                 score_llm = [id2score.get(cid, 0.0) for cid in original_candidates]
             else:
-                # Pseudo-score logic: 1.0, 0.9, 0.8 ...
+                # Rank-derived surrogate: 1.0, 0.9, 0.8 ...
                 score_llm = [max(0.0, 1.0 - 0.1 * i) for i in range(len(original_candidates))]
 
             # Compute embedding similarity
@@ -648,21 +631,19 @@ if __name__ == "__main__":
             reranked_items, combined_scores, global_counts, global_N = re_rank_candidates_greedy(
                 candidates=original_candidates,
                 rel_scores=rel_scores,
-                ctr_scores=ctr_scores, # Pass in the benefit baseline
-                score_llm=score_llm,
+                ctr_scores=ctr_scores,  # phi(sim_emb), the CTR proxy of Eq. 14
                 alpha=alpha, # alpha here corresponds to alpha_max
-                alpha_min=alpha_min, # Pass in alpha_min
-                alpha_p=alpha_p, # Pass in alpha_p
+                alpha_min=alpha_min,
+                alpha_p=alpha_p,
                 lambda1=lambda1,
                 lambda2=lambda2,
-                lambda_eiu=lambda_eiu,  # Pass in the weight
+                lambda_item=lambda_item,
                 K=K,
                 group_of=group_of,
                 p_train=p_train,
                 global_counts=global_counts,
                 global_N=global_N,
                 rank_weights=rank_weights,
-                exposure_dict_semantic=exposure_dict_semantic, # Pass in exposure_dict_semantic
                 pos_fn=pos_fn
             )
 

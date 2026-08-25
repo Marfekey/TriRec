@@ -231,7 +231,7 @@ def compute_ctr_probs(user_id: str, candidates: list[str], user_embs: dict, item
 
     return probs
 
-# Added: position exposure function (exposure decreases from top to bottom)
+# Position exposure function (exposure decreases from top to bottom)
 def position_bias(rank):
     return 1.0 / np.log2(rank + 1)
 

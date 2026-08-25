@@ -70,7 +70,7 @@ TriRec/
 ```
 
 Directories created on demand at runtime: `dataset/`, `memory/`, `log/`,
-`exposure/`, `analyze/`, `log_visual/`, `baselines/`.
+`exposure/`, `analyze/`, `log_visual/`.
 
 ## Environment
 
@@ -108,13 +108,13 @@ bash scripts/04_stage1_recall.sh
 
 # 5. Stage 2: platform sequential re-ranking
 bash scripts/05_stage2_rerank.sh log/exp_run01/recommendation_process.jsonl \
-     --lambda1 0.5 --lambda2 0.5 --lambda_ru 10 --alpha_p 0.1
-#  -> log_visual/exp_run01/<tag>/
+     --lambda1 0.5 --lambda2 0.5 --lambda_item 10 --alpha_p 0.1
+#  -> log_visual/exp_run01/exp_run01_recommendation_process_alpha<a>.jsonl
 
 # 6. Evaluation (accuracy + group fairness + item utility)
 bash scripts/06_evaluate.sh \
      log/exp_run01/recommendation_process.jsonl \
-     log_visual/exp_run01/manual_default
+     log_visual/exp_run01
 #  -> analyze/*.txt
 ```
 
@@ -129,41 +129,53 @@ Edit `src/config.py`:
 | `candidate_num` | `10` | Stage-1 candidate set size `|C_u|` (ground-truth + hard negatives) |
 | `model` | `"gpt-4o-mini"` | LLM backbone |
 | `PROMO_MODE` | `"full"` | Promotion mode, see below |
-| `MEMORY_UPDATE_ENABLED` | `False` | Promotion-feedback item memory update |
-| `MEMORY_UPDATE_BUFFER` | `3` | Feedback entries buffered per item before one integration |
+| `MEMORY_UPDATE_ENABLED` | `True` | Item memory update (Eq. 4) |
+| `MEMORY_UPDATE_BUFFER` | `3` | Promotions buffered per item before one integration |
 
 ### Promotion modes (`PROMO_MODE`)
 
-| Mode | Item-side input | User-side input | Ablates |
-| --- | --- | --- | --- |
-| `full` | LLM-enriched item memory | real user profile | — (main method) |
-| `grounded` | verifiable catalog attributes only | real user profile | factuality constraint |
-| `generic` | LLM-enriched item memory | constant placeholder | personalization |
-| `none` | raw metadata, no LLM call | n/a | the promotion mechanism itself |
+The four arms differ **only** in the item-side input handed to the user agent;
+the candidate sets are unchanged.
 
-Note that `grounded` keeps personalization intact; it only restricts which facts
-may be asserted. `generic` is the ablation of the personalization condition.
+| Mode | Item-side input | User-side input |
+| --- | --- | --- |
+| `none` | raw metadata, no LLM call | real user profile |
+| `generic` | LLM rewrite of that metadata, blind to the target user | constant placeholder |
+| `full` | user-conditioned self-promotion (main method) | real user profile |
+| `grounded` | promotion restricted to catalogue-verifiable attributes | real user profile |
 
-### Promotion-feedback item memory update
-
-When `MEMORY_UPDATE=1`, after each scoring round an item folds the user agent's
-feedback back into its own memory, so later rounds emphasize the angles that
-worked. Feedback is buffered per item and integrated by one LLM call once
-`MEMORY_UPDATE_BUFFER` entries accumulate; the files under
-`memory/<domain>_<n>/item/` are **modified in place**.
-
-The signal is only the *relative tier* implied by the user agent's own scores
-(top third / bottom third); no ground-truth label is used, since the candidate
-set is 1 positive + N negatives and using the label would leak the test signal.
-
-Disabled by default. Under the offline protocol the candidate pool is frozen, so
-each item receives too few feedback events for the update to take effect; in our
-runs it produced no significant gain (ΔNDCG@10 = −0.003, 95% CI [−0.015,
-+0.011], n = 900 paired users).
+`generic` versus `none` isolates **expression** (whether a written promotion is
+supplied at all); `full` versus `generic` isolates **conditioning** (whether that
+promotion is targeted at the arriving user), holding the LLM rewrite fixed.
+`grounded` is a fourth arm that swaps the information source rather than
+deleting adjectives: it keeps personalization intact and only restricts which
+facts may be asserted.
 
 ```bash
-export MEMORY_UPDATE=1                     # enable
-export MEMORY_UPDATE_BUFFER=3              # entries per integration
+# One Stage-1 run per arm; each writes its own log/exp_<EXPERIMENT_ID>/
+for arm in none generic full grounded; do
+    EXPERIMENT_ID=$arm PROMO_MODE=$arm bash scripts/04_stage1_recall.sh
+done
+```
+
+### Item memory update (Eq. 4)
+
+After serving a user, the item agent folds the promotion it just wrote back into
+its own memory, so later promotions build on earlier phrasing instead of
+restating metadata. Promotions are buffered per item and integrated by one LLM
+call once `MEMORY_UPDATE_BUFFER` entries accumulate; the files under
+`memory/<domain>_<n>/item/` are **modified in place**, so keep a pristine copy of
+the memory directory if you intend to re-run from the same initial state.
+
+The update consumes only the audience representation the promotion was
+conditioned on and the generated text itself. The realized ranking and the
+ground-truth interaction are never consumed, so no test signal enters memory.
+
+Enabled by default:
+
+```bash
+export MEMORY_UPDATE=0                     # freeze the item memory
+export MEMORY_UPDATE_BUFFER=3              # promotions per integration
 bash scripts/04_stage1_recall.sh
 ```
 

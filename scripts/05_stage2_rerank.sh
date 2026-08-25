@@ -6,7 +6,7 @@
 # Usage:
 #   bash scripts/05_stage2_rerank.sh <stage1_output.jsonl> [extra args...]
 #   e.g. bash scripts/05_stage2_rerank.sh log/exp_run01/recommendation_process.jsonl \
-#               --lambda1 0.5 --lambda2 0.5 --lambda_eiu 10
+#               --lambda1 0.5 --lambda2 0.5 --lambda_item 10
 #
 # Optional environment variables:
 #   CAND_NUM             # |C_u|, default 10

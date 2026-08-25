@@ -78,17 +78,17 @@ def verifiable_attrs(row) -> str:
     )
 
 # ---------------------------------------------------------------------------
-# 2.2 Promotion-feedback item memory update
+# 2.2 Item memory update (Eq. 4)
 # ---------------------------------------------------------------------------
-# After each scoring round, an item can fold the user agent's feedback back into
-# its own memory, so later rounds emphasize the angles that worked.  The signal
-# is the relative tier assigned by the user agent only; no ground-truth label is
-# used (the candidate set is 1 positive + N negatives, so using the label would
-# leak the test signal).  Disabled by default: under the offline protocol the
-# candidate pool is frozen and each item receives too few feedback events for the
-# update to take effect.
-MEMORY_UPDATE_ENABLED = os.environ.get("MEMORY_UPDATE", "0") == "1"
-# Number of feedback entries buffered per item before one LLM integration fires.
+# After serving a user, the item agent folds the promotion it just wrote back
+# into its own memory, so later promotions build on earlier phrasing instead of
+# restating metadata.  The update consumes only the audience representation the
+# promotion was conditioned on and the generated text itself; the realized
+# ranking and the ground-truth interaction are never consumed, so no test signal
+# enters memory.  Enabled by default; set MEMORY_UPDATE=0 to freeze the item
+# memory.  The item memory files are rewritten in place.
+MEMORY_UPDATE_ENABLED = os.environ.get("MEMORY_UPDATE", "1") == "1"
+# Number of served promotions buffered per item before one LLM integration fires.
 MEMORY_UPDATE_BUFFER = int(os.environ.get("MEMORY_UPDATE_BUFFER", "3"))
 # Integration results longer than this many words are treated as malformed and
 # discarded, keeping the original memory.

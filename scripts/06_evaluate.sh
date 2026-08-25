@@ -4,7 +4,10 @@
 #   bash scripts/06_evaluate.sh <stage1_jsonl> <stage2_output_dir>
 #   e.g. bash scripts/06_evaluate.sh \
 #               log/exp_run01/recommendation_process.jsonl \
-#               log_visual/exp_run01/manual_default
+#               log_visual/exp_run01
+#
+# <stage2_output_dir> is the directory written by 05_stage2_rerank.sh; it holds
+# one *_recommendation_process_alpha<a>.jsonl file per alpha_max value.
 set -e
 cd "$(dirname "$0")/.."
 

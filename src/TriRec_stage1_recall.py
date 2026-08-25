@@ -69,8 +69,69 @@ memory_exp_name = f"{DOMAIN}_{num_users_to_sample}"
 exp_id = get_experiment_id()
 mode = "test"
 
-# Run-level counters (promotion feedback / memory update outcomes)
+# Run-level counters (scoring validation / item memory update)
 STATS = Counter()
+
+# A malformed or incomplete user-agent reply is re-queried at most this many
+# times before the remaining candidates are appended to the list tail.
+MAX_SCORING_RETRIES = 3
+
+
+def parse_user_scores(resp, candidate_ids):
+    """Validate one user-agent reply against the strict JSON schema of Eq. 5.
+
+    Returns ``(scores, reason, hint)`` where
+      * ``scores`` holds id/score dicts sorted by descending score: identifiers
+        outside the candidate set are dropped and duplicated identifiers are
+        collapsed to their highest score;
+      * ``reason`` is the free-text rationale, when present;
+      * ``hint`` is empty when the reply is well formed and complete, and
+        otherwise names the concrete problem so it can be fed back to the model
+        on the next attempt.
+    """
+    if not resp:
+        return [], "", "Your previous reply was empty. Output only the strict JSON object."
+
+    json_match = re.search(r'\{.*\}', resp, re.DOTALL)
+    if not json_match:
+        return [], "", "Your previous reply contained no JSON object. Output only the strict JSON object."
+    try:
+        data = json.loads(json_match.group())
+    except Exception:
+        return [], "", "Your previous reply was not valid JSON. Output only the strict JSON object."
+
+    reason = str(data.get("reason", ""))
+    candidate_id_set = set(candidate_ids)
+    best = {}
+    duplicated = set()
+    for item_info in (data.get("scores") or []):
+        iid = str(item_info.get("id")).strip()
+        if iid not in candidate_id_set:
+            continue  # identifiers outside the candidate set are dropped
+        try:
+            score = float(item_info.get("score", 0))
+        except (TypeError, ValueError):
+            continue
+        if iid in best:
+            duplicated.add(iid)
+            best[iid] = max(best[iid], score)  # collapse duplicates to the highest score
+        else:
+            best[iid] = score
+
+    scores = [{"id": iid, "score": best[iid]} for iid in best]
+    scores.sort(key=lambda x: x["score"], reverse=True)
+
+    missing = [iid for iid in candidate_ids if iid not in best]
+    problems = []
+    if duplicated:
+        problems.append(f"repeated these IDs: {', '.join(sorted(duplicated))}")
+    if missing:
+        problems.append(f"omitted these IDs: {', '.join(missing)}")
+    hint = ""
+    if problems:
+        hint = ("Your previous reply " + " and ".join(problems)
+                + ". Score every listed ID exactly once, and output only the strict JSON object.")
+    return scores, reason, hint
 
 
 # Candidate pool = 1 GT + N_NEG, derived from config.candidate_num
@@ -163,41 +224,24 @@ def build_ad_prompt(item_title, item_description, item_row, user_description):
 
 
 # ---------------------------------------------------------------------------
-# Promotion-feedback item memory update
+# Item memory update (Eq. 4)
 # ---------------------------------------------------------------------------
 # The item memory files under memory/<domain>_<n>/item/ are modified in place.
 MEMORY_UPDATE_DIR = MEMORY_ROOT / memory_exp_name / "item"
-MEMORY_UPDATE_BUF = defaultdict(list)  # item_id -> [feedback entries]
+MEMORY_UPDATE_BUF = defaultdict(list)  # item_id -> [served promotion entries]
 
 
 def summarize_user_group(user_description, max_words=25):
     """Compress a single user's memory into a short collective description.
 
-    Consistent with note 3 of ``item_prompt_template``: user preferences may only
-    be referred to collectively, never as a specific individual.
+    This is the audience representation z_u that Eq. 4 consumes.  Consistent with
+    note 3 of ``item_prompt_template``: user preferences may only be referred to
+    collectively, never as a specific individual.
     """
     text = re.sub(r"===[^=]*===", " ", str(user_description))
     text = re.sub(r"\s+", " ", text).strip()
     words = text.split(" ")[:max_words]
     return "users whose profile indicates: " + " ".join(words)
-
-
-def promotion_outcome_tier(rank, total):
-    """Map a within-candidate-set rank to a promotion outcome tier.
-
-    Only the relative tier produced by the user agent's own scores is used; no
-    ground-truth label is involved (the candidate set is 1 positive + N
-    negatives, so using the label would leak the test signal).  A relative tier
-    rather than an absolute score avoids scale drift across rounds.
-    """
-    if total <= 1:
-        return None
-    frac = rank / float(total)
-    if frac <= 1.0 / 3:
-        return "effective (ranked near the top by this audience)"
-    if frac >= 2.0 / 3:
-        return "ineffective (ranked near the bottom by this audience)"
-    return None  # the middle tier carries little signal, so it is not buffered
 
 
 def flush_item_memory(item_id, item_title, entries):
@@ -231,30 +275,29 @@ def flush_item_memory(item_id, item_title, entries):
         return False
 
 
-def record_promotion_feedback(user_description, user_agent_scores, item_ads_list):
-    """Buffer this round's feedback per item and integrate once the buffer fills."""
-    if not (MEMORY_UPDATE_ENABLED and user_agent_scores):
+def record_served_promotion(user_description, item_ads_list):
+    """Buffer the promotions served to this user, integrating once a buffer fills.
+
+    Implements the inputs of Eq. 4: each entry holds only the audience
+    representation the promotion was conditioned on (z_u) and the generated
+    promotion itself (S_{i->u}).  The realized ranking and the ground-truth
+    interaction are deliberately not passed in, so no test signal can enter the
+    memory.
+    """
+    if not (MEMORY_UPDATE_ENABLED and item_ads_list):
         return
-    user_group = summarize_user_group(user_description)
-    total_scored = len(user_agent_scores)
-    ad_by_id = {str(it["id"]): it for it in item_ads_list}
-    for rank_idx, sc in enumerate(user_agent_scores):
-        tier = promotion_outcome_tier(rank_idx, total_scored)
-        if tier is None:
-            continue
-        ad_entry = ad_by_id.get(str(sc["id"]))
-        if not ad_entry:
-            continue
-        MEMORY_UPDATE_BUF[sc["id"]].append({
-            "user_group": user_group,
-            "selling_point": ad_entry["ad"],
-            "outcome": tier,
+    audience = summarize_user_group(user_description)
+    for ad_entry in item_ads_list:
+        item_id = str(ad_entry["id"])
+        MEMORY_UPDATE_BUF[item_id].append({
+            "audience": audience,
+            "promotion": ad_entry["ad"],
             "title": ad_entry["title"],
         })
-        STATS["n_memory_feedback"] += 1
-        if len(MEMORY_UPDATE_BUF[sc["id"]]) >= MEMORY_UPDATE_BUFFER:
-            entries = MEMORY_UPDATE_BUF.pop(sc["id"])
-            ok = flush_item_memory(sc["id"], entries[0]["title"], entries)
+        STATS["n_memory_events"] += 1
+        if len(MEMORY_UPDATE_BUF[item_id]) >= MEMORY_UPDATE_BUFFER:
+            entries = MEMORY_UPDATE_BUF.pop(item_id)
+            ok = flush_item_memory(item_id, entries[0]["title"], entries)
             STATS["n_memory_update" if ok else "n_memory_update_failed"] += 1
 
 
@@ -262,7 +305,7 @@ def flush_remaining_memory_updates():
     """Integrate the residual buffers that never reached MEMORY_UPDATE_BUFFER."""
     if not (MEMORY_UPDATE_ENABLED and MEMORY_UPDATE_BUF):
         return
-    print(f"Memory update: flushing residual feedback for {len(MEMORY_UPDATE_BUF)} items")
+    print(f"Memory update: flushing residual promotions for {len(MEMORY_UPDATE_BUF)} items")
     for item_id in list(MEMORY_UPDATE_BUF.keys()):
         entries = MEMORY_UPDATE_BUF.pop(item_id)
         ok = flush_item_memory(item_id, entries[0]["title"], entries)
@@ -411,9 +454,9 @@ if __name__ == "__main__":
                 target_item_title = str(itemDF[itemDF["parent_asin"] == target_itemId]["title"].values[0])
                 main_kind = itemDF[itemDF["parent_asin"] == target_itemId]["main_category"].values[0]
 
-                # Read user memory (single domain)
-                one_domain_user_path = str(MEMORY_ROOT / memory_exp_name / "user" / f"user.{userId}")
-                with open(one_domain_user_path, "r", encoding="utf-8") as file:
+                # Read the user agent's preference memory (the interest representation z_u)
+                user_memory_path = str(MEMORY_ROOT / memory_exp_name / "user" / f"user.{userId}")
+                with open(user_memory_path, "r", encoding="utf-8") as file:
                     user_description = file.read()
 
                 # Stage 1: fetch 100 candidates from the pre-generated random.csv, and sample 1 GT + 9 Random
@@ -494,66 +537,73 @@ if __name__ == "__main__":
                         'ad': ad_text
                     })
 
-            # B. User ranking in parallel (User Agent)
-            user_prompts = []
-            valid_user_indices = []
-            
-            for i, d in enumerate(batch_data):
-                if d['item_ads_list']:
-                    user_prompts.append(user_agent_prompt(d['user_description'], d['item_ads_list']))
-                    valid_user_indices.append(i)
+            # B. User ranking in parallel (User Agent).  Replies are validated
+            #    against the strict JSON schema; malformed or incomplete ones are
+            #    re-queried with the concrete error at most MAX_SCORING_RETRIES
+            #    times.
+            pending = [(i, "") for i, d in enumerate(batch_data) if d['item_ads_list']]
+            scored = {}  # user_idx -> (scores, reason, raw_response)
 
-            user_responses = parallel_get_responses(user_prompts, model, max_workers=MAX_WORKERS)
+            for attempt in range(MAX_SCORING_RETRIES + 1):
+                if not pending:
+                    break
+                user_prompts = [
+                    user_agent_prompt(
+                        batch_data[i]['user_description'],
+                        batch_data[i]['item_ads_list'],
+                        retry_hint=hint,
+                    )
+                    for i, hint in pending
+                ]
+                user_responses = parallel_get_responses(user_prompts, model, max_workers=MAX_WORKERS)
+
+                retry_queue = []
+                for (i, _), resp in zip(pending, user_responses):
+                    candidate_ids = [str(it['id']) for it in batch_data[i]['item_ads_list']]
+                    scores, reason, hint = parse_user_scores(resp, candidate_ids)
+                    if not hint:
+                        scored[i] = (scores, reason, resp)
+                    elif attempt < MAX_SCORING_RETRIES:
+                        STATS["n_scoring_requery"] += 1
+                        retry_queue.append((i, hint))
+                    else:
+                        # Retries exhausted: keep whatever was parsed; the tail is
+                        # filled in below so the list still has length |C_u|.
+                        STATS["n_scoring_unresolved"] += 1
+                        scored[i] = (scores, reason, resp)
+                pending = retry_queue
 
             # C. Parse results and compute metrics
-            for resp, user_idx in zip(user_responses, valid_user_indices):
+            for user_idx in sorted(scored):
                 d = batch_data[user_idx]
+                ranked_scores, user_agent_reason, resp = scored[user_idx]
                 try:
-                    # Stage 2 parsing: extract scores and ranking from JSON
-                    final_item_ids, final_result_list, user_agent_scores = [], [], []
-                    user_agent_reason = ""
-                    if resp:
-                        try:
-                            # Try to match a JSON block
-                            json_match = re.search(r'\{.*\}', resp, re.DOTALL)
-                            if json_match:
-                                data = json.loads(json_match.group())
-                                scores_list = data.get("scores", [])
-                                user_agent_reason = str(data.get("reason", ""))
-                                
-                                # Extract all valid candidate scores (compare as str to avoid numeric ID mismatch)
-                                candidate_id_set = {str(it['id']) for it in d['item_ads_list']}
-                                valid_scores = []
-                                for item_info in scores_list:
-                                    iid = str(item_info.get("id")).strip()
-                                    score = float(item_info.get("score", 0))
-                                    if iid in candidate_id_set:
-                                        valid_scores.append({"id": iid, "score": score})
-                                
-                                # Sort by score descending as the final ranking
-                                valid_scores.sort(key=lambda x: x["score"], reverse=True)
-                                
-                                for item_info in valid_scores:
-                                    iid = item_info["id"]
-                                    final_item_ids.append(iid)
-                                    final_result_list.append(str(itemDF[itemDF["parent_asin"] == iid]["title"].values[0]))
-                                    user_agent_scores.append(item_info)
-                        except Exception as e:
-                            print(f"JSON parsing failed for user {d['userId']}: {e}")
-                    
-                    # If parsing fails or result is empty, skip this record
+                    # Any candidate the user agent never scored is appended to the
+                    # list tail, so the scored list always has length |C_u|.
+                    candidate_ids = [str(it['id']) for it in d['item_ads_list']]
+                    already_scored = {s["id"] for s in ranked_scores}
+                    tail = [{"id": iid, "score": 0.0} for iid in candidate_ids if iid not in already_scored]
+                    if tail:
+                        STATS["n_tail_filled_users"] += 1
+                        STATS["n_tail_filled_items"] += len(tail)
+
+                    user_agent_scores = list(ranked_scores) + tail
+                    final_item_ids, final_result_list = [], []
+                    for item_info in user_agent_scores:
+                        iid = item_info["id"]
+                        final_item_ids.append(iid)
+                        final_result_list.append(str(itemDF[itemDF["parent_asin"] == iid]["title"].values[0]))
+
+                    # Only possible when the candidate set itself is empty
                     if not final_item_ids:
-                        print(f"User {d['userId']} result parsing failed or empty; skipping this sample.")
-                        print(f"  item_ads_list size: {len(d['item_ads_list'])}")
-                        print(f"  raw response (first 300 chars): {str(resp)[:300] if resp else 'None'}")
+                        print(f"User {d['userId']} has no scorable candidate; skipping this sample.")
                         continue
 
-                    # Promotion-feedback item memory update.
-                    # Uses only the relative tiers implied by the user agent's scores;
-                    # no ground-truth label is involved.
-                    record_promotion_feedback(
-                        d['user_description'], user_agent_scores, d['item_ads_list']
-                    )
+                    # Item memory update (Eq. 4): after serving this user, each item
+                    # folds the promotion it just wrote back into its own memory.
+                    # Only the audience representation and the generated text are
+                    # consumed, never the realized ranking.
+                    record_served_promotion(d['user_description'], d['item_ads_list'])
 
                     # Stage 1 metrics (only computed when stage 2 succeeds, for a fair comparison)
                     result_list = [str(itemDF[itemDF["parent_asin"] == iid]["title"].values[0]) for iid in d['top_k_items']]
@@ -652,7 +702,11 @@ if __name__ == "__main__":
     with open(execution_log_path, "a", encoding="utf-8") as f:
         f.write(f"End Time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Total Duration: {end_time - start_time}\n")
+        f.write(f"Scoring Re-queries: {STATS['n_scoring_requery']}\n")
+        f.write(f"Scoring Unresolved After Retries: {STATS['n_scoring_unresolved']}\n")
+        f.write(f"Tail-Filled Users: {STATS['n_tail_filled_users']}\n")
+        f.write(f"Tail-Filled Candidates: {STATS['n_tail_filled_items']}\n")
         if MEMORY_UPDATE_ENABLED:
-            f.write(f"Memory Feedback Entries: {STATS['n_memory_feedback']}\n")
+            f.write(f"Memory Update Events: {STATS['n_memory_events']}\n")
             f.write(f"Memory Updates Applied: {STATS['n_memory_update']}\n")
             f.write(f"Memory Updates Failed: {STATS['n_memory_update_failed']}\n")

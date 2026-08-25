@@ -451,7 +451,6 @@ class SASREC(tf.keras.Model):
         seq_embeddings = self.item_embedding_layer(input_seq)
         seq_embeddings = seq_embeddings * (self.embedding_dim ** 0.5)
 
-        # FIXME
         positional_seq = tf.expand_dims(tf.range(tf.shape(input_seq)[1]), 0)
         positional_seq = tf.tile(positional_seq, [tf.shape(input_seq)[0], 1])
         positional_embeddings = self.positional_embedding_layer(positional_seq)
@@ -909,54 +908,6 @@ class SASREC(tf.keras.Model):
 
         return return_dict
     
-    def old_get_user_item_score(self, dataset, user_map_dict,item_map_dict,user_id_list, item_list,is_test=False):
-        """
-        Deprecated
-        """
-        all = dataset.User
-        users = [user_map_dict[u] for u in user_id_list]
-        items = [item_map_dict[i] for i in item_list]
-        # inv_user_map = {v: k for k, v in user_map_dict.items()}
-        # inv_item_map = {v: k for k, v in item_map_dict.items()}        
-        score_dict = {i:[] for i in item_list}
-        
-        for u in tqdm(users,unit=' User',desc='Getting Scores for each user ...'):
-                
-            seq = np.zeros([self.seq_max_len], dtype=np.int32)
-            idx = self.seq_max_len - 1
-
-            list_to_seq = all[u] if not is_test else all[u][:-1]
-            for i in reversed(list_to_seq):
-                seq[idx] = i
-                idx -= 1
-                if idx == -1:
-                    break
-        
-            inputs = {}
-            inputs["user"] = np.expand_dims(np.array([u]), axis=-1)
-            inputs["input_seq"] = np.array([seq])
-            inputs["candidate"] = np.array([items])
-
-            predictions = self.predict(inputs, len(items)-1)
-            predictions = np.array(predictions)
-            predictions = predictions[0]
-
-            # pred_dict = {inv_item_map[v] : predictions[i] for i,v in enumerate(items)}
-
-            for i,v in enumerate(item_list):
-                score_dict[v].append(predictions[i])                      
-
-        return_df = pd.DataFrame({
-            'user_id':user_id_list,
-        })
-        
-        for k in score_dict:
-            return_df[k] = score_dict[k]
-        
-        return_df = return_df.sort_values(by='user_id').reset_index(drop=True)
-
-        return return_df
-        
     def get_user_item_score(self,dataset,user_id_list, item_list,user_map_dict,item_map_dict,batch_size=128):
         """Get item score for each user on batch
 
